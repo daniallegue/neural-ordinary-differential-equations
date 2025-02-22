@@ -1,9 +1,16 @@
+from datetime import time
+
 import jax
 import jax.numpy as jnp
 from jax import random, grad, jit
 from typing import Dict, Tuple
 import optax
 import diffrax
+from matplotlib import pyplot as plt
+
+# Define an optimizer
+lr = 0.001
+optimizer = optax.adam(lr)
 
 def initialize_params(
         key: jax.random.PRNGKey,
@@ -110,26 +117,3 @@ def train_step(
     new_params = optax.apply_updates(params, updates)
 
     return new_params, opt_state, loss
-
-key = jax.random.PRNGKey(42)
-input_dim = 4
-hidden_dim = 16
-output_dim = 4
-
-params : Dict[str, jnp.ndarray] = initialize_params(key, input_dim, hidden_dim, output_dim)
-
-lr = 0.001
-optimizer = optax.adam(lr)
-
-opt_state = optimizer.init(params)
-
-z0 : jnp.ndarray = jnp.array([0.1, -0.2, 0.3, 0.0])
-t0 : float = 0.0
-t1 : float = 1.0
-
-target : jnp.ndarray = jnp.array([0.0, 0.0, 0.0, 0.0])
-
-params, opt_state, loss = train_step(params, opt_state, z0, t0, t1, target)
-print("Loss after one training step:", loss)
-
-

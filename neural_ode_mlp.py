@@ -4,6 +4,8 @@ from jax import random, jit, vmap
 from typing import Dict, List, Tuple
 import optax
 import diffrax
+import time
+from matplotlib import pyplot as plt
 
 # Define optimizer for later use
 learning_rate = 0.001
@@ -153,24 +155,124 @@ def train_step(
     return new_params, opt_state, loss
 
 
-key = random.PRNGKey(42)
-input_dim = 4      # Dimension of the latent state z.
-hidden_dims = [32, 32]  # Two hidden layers with 32 units each.
-output_dim = 4     # Output dimension (should match input dimension for ODE state evolution).
+def generate_synthetic_dataset(
+        key : random.PRNGKey,
+        num_samples : int,
+        input_dim : int
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Generates a synthetic dataset for which dz/dt = -z.
+    For an initial state z0, z(1) = exp(-1) * z0
 
-# Initialize the large network parameters.
-params = init_params(key, input_dim, hidden_dims, output_dim)
+    :param key: RNG Key
+    :param num_samples: Number of samples to generate
+    :param input_dim: Sample Dimension
+    :return: Initial state, Target
+    """
+
+    z0_data = random.normal(key, (num_samples, input_dim))
+
+    # True Solution
+    target_data = jnp.exp(-1) * z0_data
+
+    return z0_data, target_data
+
+def train_model(
+        params : Dict[str, jnp.ndarray],
+        opt_state : optax.OptState,
+        z0_data : jnp.ndarray,
+        target_data : jnp.ndarray,
+        t0 : float,
+        t1 : float,
+        num_epochs : int,
+        batch_size : int
+) -> Tuple[Dict[str, jnp.ndarray], optax.OptState, list, list]:
+    """
+    Train Method
+
+    :param params: Param dict
+    :param opt_state: Optimizer state
+    :param z0_data: Inital data
+    :param target_data: Target data
+    :param t0: Initial t
+    :param t1: Final t
+    :param num_epochs: Number of epochs
+    :param batch_size: Batch size
+    :return: Updated params, Optimizer state
+    """
+
+    num_samples = z0_data.shape[0]
+    num_batches = num_samples // batch_size
+
+    loss_history = []
+    time_history = []
+
+    for epoch in range(num_epochs):
+        epoch_start = time.time()
+        perm_key = random.PRNGKey(epoch)
+        perm = random.permutation(perm_key, num_samples)
+
+        # Permute data
+        z0_data_shuffled = z0_data[perm]
+        target_data_shuffled = target_data[perm]
+
+        epoch_loss = 0.0
+        for i in range(num_epochs):
+            start = i * batch_size
+            end = start + batch_size
+
+            z0_batch = z0_data_shuffled[start:end]
+            target_batch = target_data_shuffled[start:end]
+            params, opt_state, loss = train_step(params, opt_state, z0_batch, t0, t1, target_batch)
+            epoch_loss += loss
+        epoch_loss /= num_batches
+        epoch_end = time.time()
+        epoch_time = epoch_end - epoch_start
+        loss_history.append(epoch_loss)
+        time_history.append(epoch_time)
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.6f}, Time: {epoch_time:.2f} sec")
+
+    return params, opt_state, loss_history, time_history
+
+key = random.PRNGKey(42)
+input_dim = 4
+hidden_dim = 16
+output_dim = 4
+
+# Initialize model parameters.
+params = init_params(key, input_dim, [16], output_dim)
+
+num_epochs = 40
+batch_size = 32
 
 opt_state = optimizer.init(params)
 
-batch_size = 10
-z0_batch = jnp.stack([jnp.array([0.1, -0.2, 0.3, 0.0]) for _ in range(batch_size)])
-target_batch = jnp.stack([jnp.array([0.0, 0.0, 0.0, 0.0]) for _ in range(batch_size)])
+num_samples = 10000
+z0_data, target_data = generate_synthetic_dataset(key, num_samples, input_dim)
 
-# Define integration times.
 t0 = 0.0
 t1 = 1.0
 
-# Run one training step on the batch.
-params, opt_state, loss = train_step(params, opt_state, z0_batch, t0, t1, target_batch)
-print("Batch loss after one training step:", loss)
+
+params, opt_state, loss_history, time_history = train_model(params, opt_state,
+    z0_data, target_data, t0, t1, num_epochs, batch_size)
+
+
+# Plot training loss and epoch times.
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.plot(loss_history, marker='o')
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Training Loss Curve")
+
+plt.subplot(1, 2, 2)
+plt.plot(time_history, marker='o', color='orange')
+plt.xlabel("Epoch")
+plt.ylabel("Time (sec)")
+plt.title("Epoch Training Time")
+
+plt.tight_layout()
+plt.show()
+
