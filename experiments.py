@@ -1,13 +1,11 @@
-from typing import Tuple, List
-
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
+import torch.nn.functional as F
 import time
 
+from rnn_baseline import RNNVAE
 from latent_ode_model import LatentODEModel
 
 def generate_spiral_dataset(num_spirals : int = 1000, timesteps : int = 100, noise_std : float = 0.1) -> jnp.ndarray:
@@ -65,86 +63,6 @@ def generate_clean_spiral(timesteps: int, clockwise: bool = True) -> jnp.ndarray
     spiral = jnp.stack([x, y], axis=1)
     return spiral
 
-class RNNBaselineGaussian(nn.Module):
-
-    def __init__(self, input_dim : int = 2, time_dim : int = 1, hidden_dim : int = 25, output_dim : int = 2):
-        """
-        Init model
-
-        :param input_dim: Input dimension
-        :param time_dim: Time dimension
-        :param hidden_dim: Hidden dimension
-        :param output_dim: Output dimension
-        """
-        super(RNNBaselineGaussian, self).__init__()
-        self.rnn = nn.RNN(input_dim, hidden_dim, batch_first=True)
-        self.fc = nn.Linear(hidden_dim, 2 * output_dim)
-
-    def forward(self, x : torch.Tensor):
-        """
-        Forward inference
-
-        :param x: X
-        :return: Preds
-        """
-
-        out, _ = self.rnn(x)  # out: (batch, timesteps, hidden_dim)
-        out = self.fc(out)  # out: (batch, timesteps, 2 * output_dim)
-        mu, log_var = out.chunk(2, dim=-1)  # Split into mean and log-variance
-        return mu, log_var
-
-class RNNBaselineTimeDiffGaussian(nn.Module):
-    """
-    A baseline RNN whose inputs are concatenated with time differences.
-    """
-
-    def __init__(self, input_dim: int = 2, time_dim: int = 1, hidden_dim: int = 25, output_dim: int = 2):
-        """
-        Init model
-
-        :param input_dim: Input dimension
-        :param time_dim: Time dimension
-        :param hidden_dim: Hidden dimension
-        :param output_dim: Output dimension
-        """
-
-        super(RNNBaselineTimeDiffGaussian, self).__init__()
-        self.rnn = nn.RNN(input_dim + time_dim, hidden_dim, batch_first=True)
-        self.fc = nn.Linear(hidden_dim, 2 * output_dim)
-
-    def forward(self, x: torch.Tensor, dt: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward inference
-
-        :param x: X
-        :param dt: Time difference
-        :return: Preds
-        """
-        batch_size, timesteps, _ = x.size()
-        if dt.dim() == 2:
-            dt = dt.unsqueeze(0).expand(batch_size, -1, -1)  # shape (batch, timesteps, 1)
-
-        x_cat = torch.cat([x, dt], dim=2)  # shape (batch, timesteps, input_dim + time_dim)
-        out, _ = self.rnn(x_cat)
-        out = self.fc(out)
-        mu, log_var = out.chunk(2, dim=-1)
-        return mu, log_var
-
-def gaussian_nll_loss(mu: torch.Tensor, log_var: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """
-    Negative log-likelihood loss for a Gaussian with mean=mu, variance=exp(log_var).
-    Args:
-        mu: shape (batch, timesteps, output_dim)
-        log_var: shape (batch, timesteps, output_dim)
-        target: shape (batch, timesteps, output_dim)
-    Returns:
-        Scalar loss (averaged).
-    """
-    var = torch.exp(log_var)
-    nll = 0.5 * (log_var + (target - mu) ** 2 / var)
-    return nll.mean()
-
-
 def plot_spirals(data, num_samples=5):
     """
     Plots several sample spirals.
@@ -173,230 +91,183 @@ def plot_predictions(true_data, pred_data, title="Predictions vs True"):
     plt.show()
 
 
-def train_rnn_baseline_gaussian(
-    model: nn.Module,
-    data: jnp.ndarray,
-    num_epochs: int = 20,
-    lr: float = 0.001,
-    use_time_diff: bool = False
-) -> Tuple[List[float], float]:
-    """
-    Trains a Gaussian-output RNN model on the spiral dataset.
-    data: shape (num_spirals, timesteps, 2) as a JAX array
-    Returns: (list of epoch losses, total training time)
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    model.train()
-
-    # Convert JAX array to NumPy -> Torch
-    data_np = np.array(data)
-    batch_size = 32
-    losses = []
-    start_time = time.time()
-
-    if use_time_diff:
-        dt = torch.ones(data_np.shape[1], 1).to(device)  # shape (timesteps, 1)
-
-    for epoch in range(num_epochs):
-        epoch_loss = 0.0
-        perm = np.random.permutation(data_np.shape[0])
-        for i in range(0, data_np.shape[0], batch_size):
-            indices = perm[i : i + batch_size]
-            batch = torch.tensor(data_np[indices], dtype=torch.float32).to(device)
-            optimizer.zero_grad()
-
-            if use_time_diff:
-                mu, log_var = model(batch, dt)
-            else:
-                mu, log_var = model(batch)
-
-            loss = gaussian_nll_loss(mu, log_var, batch)  # compare to batch
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-
-        epoch_loss /= (data_np.shape[0] / batch_size)
-        print(f"Gaussian RNN Epoch {epoch+1}/{num_epochs}, NLL Loss: {epoch_loss:.6f}")
-        losses.append(epoch_loss)
-
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f"Total training time for Gaussian RNN baseline: {total_time:.2f} seconds")
-    return losses, total_time
-
-
 def main():
-    # Step A: Generate the dataset.
+    # -------------------------------
+    # Generate the Spiral Dataset
+    # -------------------------------
     num_spirals = 1000
     timesteps = 100
     noise_std = 0.1
-    data = generate_spiral_dataset(num_spirals, timesteps, noise_std)
-    print("Dataset shape:", data.shape)  # Expected: (1000, 100, 2)
-    plot_spirals(data, num_samples=5)
+    data_jax = generate_spiral_dataset(num_spirals, timesteps, noise_std)
+    # Convert JAX array to NumPy for plotting and PyTorch training where needed.
+    data_np = np.array(data_jax)
+    print("Generated spiral dataset.")
+    plot_spirals(data_np, num_samples=5)
 
-
+    # -------------------------------
+    # Train the Latent ODE Model (JAX)
+    # -------------------------------
+    from jax import random
+    key = random.PRNGKey(0)
     latent_ode_model = LatentODEModel(
         input_dim=2,
-        rnn_hidden=25,
-        latent_dim=4,
+        rnn_hidden=32,
+        latent_dim=6,
         dynamics_hidden=20,
-        decoder_hidden=20,
+        decoder_hidden=32,
         timesteps=timesteps,
-        lr=0.01
+        lr=0.001,
+        key=key
     )
+    num_epochs = 100
+    batch_size = 32
     print("Training Latent ODE model...")
-    x_data_jnp = jnp.array(data)
-    ode_loss_history, ode_time_history = latent_ode_model.train(x_data_jnp, num_epochs=100, batch_size=32)
-    print("Latent ODE model training complete.")
-    print("Final Loss:", ode_loss_history[-1])
-    print("Total Training Time (approx):", sum(ode_time_history))
+    ode_loss_history, ode_time_history = latent_ode_model.train(data_jax, num_epochs, batch_size)
+
+    # -------------------------------
+    # Train the RNN-VAE Model (PyTorch)
+    # -------------------------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rnn_vae = RNNVAE(input_dim=2, hidden_dim=32, latent_dim=6, output_dim=2, num_layers=1, bidirectional=True)
+    rnn_vae = rnn_vae.to(device)
+    optimizer = torch.optim.Adam(rnn_vae.parameters(), lr=0.001)
+    rnn_epochs = 100
+    rnn_batch_size = 32
+    rnn_loss_history = []
+    rnn_time_history = []
+    # Convert training data to torch tensor
+    data_torch = torch.tensor(data_np, dtype=torch.float32).to(device)
+    num_samples = data_torch.shape[0]
+    num_batches = num_samples // rnn_batch_size
+
+    print("Training RNN-VAE model...")
+    for epoch in range(rnn_epochs):
+        start_time = time.time()
+        perm = torch.randperm(num_samples)
+        data_torch = data_torch[perm]
+        epoch_loss = 0.0
+        for i in range(num_batches):
+            batch = data_torch[i * rnn_batch_size : (i + 1) * rnn_batch_size]
+            optimizer.zero_grad()
+            x_recon, mu, logvar = rnn_vae(batch)
+            # Reconstruction loss (MSE)
+            recon_loss = F.mse_loss(x_recon, batch, reduction='mean')
+            # KL divergence loss
+            kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+            # Beta annealing schedule: increase KL weight over epochs
+            beta = epoch / rnn_epochs
+            loss = recon_loss + beta * kl_loss
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        epoch_loss /= num_batches
+        epoch_time = time.time() - start_time
+        rnn_loss_history.append(epoch_loss)
+        rnn_time_history.append(epoch_time)
+        print(f"RNN-VAE Epoch {epoch+1}/{rnn_epochs}, Loss: {epoch_loss:.6f}, Time: {epoch_time:.2f}s")
+
+    # -------------------------------
+    # Plot Loss Curves and Training Times
+    # -------------------------------
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(ode_loss_history, label="Latent ODE Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Latent ODE Training Loss")
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(rnn_loss_history, label="RNN-VAE Loss", color='orange')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("RNN-VAE Training Loss")
+    plt.legend()
+    plt.show()
+
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(ode_time_history, label="Latent ODE Training Time")
+    plt.xlabel("Epoch")
+    plt.ylabel("Time (s)")
+    plt.title("Latent ODE Training Times")
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(rnn_time_history, label="RNN-VAE Training Time", color='orange')
+    plt.xlabel("Epoch")
+    plt.ylabel("Time (s)")
+    plt.title("RNN-VAE Training Times")
+    plt.legend()
+    plt.show()
+
+    # Generate a clean spiral (extrapolation: extend to 6π)
+    clean_spiral = generate_clean_spiral(timesteps=150, clockwise=True)
+    clean_spiral_np = np.array(clean_spiral)
+    # For Latent ODE: use first 100 timesteps as observed and predict 150 steps
+    observed = clean_spiral[:100]
+    ode_pred, t_pred = latent_ode_model.predict(observed, pred_timesteps=150)
+    ode_pred = np.array(ode_pred)
+    plot_predictions(clean_spiral_np, ode_pred, title="Latent ODE Extrapolation")
+
+    # For RNN-VAE: use first 100 timesteps as observed; for extrapolation, decode for 150 timesteps.
+    observed_torch = torch.tensor(np.array(observed)[None, :, :], dtype=torch.float32).to(device)
+    rnn_vae.eval()
+    with torch.no_grad():
+        # Get latent representation
+        mu, logvar = rnn_vae.encoder(observed_torch)
+        z = rnn_vae.reparameterize(mu, logvar)
+        # Decode for 150 timesteps
+        rnn_extrap = rnn_vae.decoder(z, seq_len=150).cpu().numpy()[0]
+    plot_predictions(clean_spiral_np, rnn_extrap, title="RNN-VAE Extrapolation")
+
 
     sample_idx = 0
-    sample_traj = data[sample_idx]  # shape (100, 2)
-    x_pred_fit, _ = latent_ode_model.predict(jnp.array(sample_traj), pred_timesteps=timesteps)
-    x_pred_extrap, _ = latent_ode_model.predict(jnp.array(sample_traj), pred_timesteps=150)
-    sample_traj_np = np.array(sample_traj)
-    x_pred_fit_np = np.array(x_pred_fit)
-    x_pred_extrap_np = np.array(x_pred_extrap)
-    plot_predictions(sample_traj_np, x_pred_fit_np, title="Latent ODE - Fitting")
-    plot_predictions(sample_traj_np, x_pred_extrap_np, title="Latent ODE - Extrapolation")
-
-    print("Training Baseline RNN (without time difference)...")
-    rnn_model = RNNBaselineGaussian(input_dim=2, hidden_dim=25, output_dim=2)
-    rnn_losses, rnn_time = train_rnn_baseline_gaussian(rnn_model, data, num_epochs=100, lr=0.001, use_time_diff=False)
-    rnn_model.eval()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sample_torch = torch.tensor(np.array(sample_traj), dtype=torch.float32).unsqueeze(0).to(device)
+    sample_spiral = data_np[sample_idx]  # shape (100, 2)
+    # Latent ODE interpolation (predict with 100 timesteps)
+    ode_interp, _ = latent_ode_model.predict(jnp.array(sample_spiral), pred_timesteps=100)
+    ode_interp = np.array(ode_interp)
+    # RNN-VAE interpolation: simply run the forward pass.
+    sample_torch = torch.tensor(sample_spiral[None, :, :], dtype=torch.float32).to(device)
+    rnn_vae.eval()
     with torch.no_grad():
-        mu, log_var = rnn_model(sample_torch)
-        rnn_pred = mu.cpu().numpy()[0]
-    plot_predictions(sample_traj_np, rnn_pred, title="Baseline RNN Predictions")
+        rnn_interp, _, _ = rnn_vae(sample_torch)
+    rnn_interp = rnn_interp.cpu().numpy()[0]
 
-    print("Training Baseline RNN (with time difference)...")
-    rnn_model_td = RNNBaselineTimeDiffGaussian(input_dim=2, time_dim=1, hidden_dim=25, output_dim=2)
-    rnn_losses_td, rnn_time_td = train_rnn_baseline_gaussian(rnn_model_td, data, num_epochs=100, lr=0.001, use_time_diff=True)
-    rnn_model_td.eval()
-    dt = torch.ones(data.shape[1], 1)
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(sample_spiral[:, 0], sample_spiral[:, 1], 'o-', label="Ground Truth")
+    plt.plot(ode_interp[:, 0], ode_interp[:, 1], 'x--', label="Latent ODE")
+    plt.title("Latent ODE Interpolation")
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(sample_spiral[:, 0], sample_spiral[:, 1], 'o-', label="Ground Truth")
+    plt.plot(rnn_interp[:, 0], rnn_interp[:, 1], 'x--', label="RNN-VAE")
+    plt.title("RNN-VAE Interpolation")
+    plt.legend()
+    plt.show()
+
+    # -------------------------------
+    # Extrapolation Evaluation: Counter-Clockwise Spiral (Additional Case)
+    # -------------------------------
+    # Generate a counter-clockwise clean spiral (extrapolation: extend to 6π)
+    clean_spiral_ccw = generate_clean_spiral(timesteps=150, clockwise=False)
+    clean_spiral_ccw_np = np.array(clean_spiral_ccw)
+    # For Latent ODE: use first 100 timesteps as observed and predict 150 steps
+    observed_ccw = clean_spiral_ccw[:100]
+    ode_pred_ccw, t_pred_ccw = latent_ode_model.predict(observed_ccw, pred_timesteps=150)
+    ode_pred_ccw = np.array(ode_pred_ccw)
+    plot_predictions(clean_spiral_ccw_np, ode_pred_ccw, title="Latent ODE Extrapolation (Counter-Clockwise)")
+
+    # For RNN-VAE: use first 100 timesteps as observed; decode for 150 timesteps.
+    observed_ccw_torch = torch.tensor(np.array(observed_ccw)[None, :, :], dtype=torch.float32).to(device)
+    rnn_vae.eval()
     with torch.no_grad():
-        mu, log_var = rnn_model_td(sample_torch, dt.to(device))
-        rnn_pred_td = mu.cpu().numpy()[0]
-    plot_predictions(sample_traj_np, rnn_pred_td, title="Baseline RNN (Time Diff) Predictions")
-
-
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 2, 1)
-    plt.plot(ode_loss_history, label="Latent ODE")
-    plt.plot(rnn_losses, label="RNN Baseline")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training Loss Comparison")
-    plt.legend()
-    plt.subplot(1, 2, 2)
-    plt.bar(["Latent ODE", "RNN Baseline"], [sum(ode_time_history), rnn_time], color=["blue", "orange"])
-    plt.ylabel("Time (sec)")
-    plt.title("Training Time Comparison")
-    plt.tight_layout()
-    plt.show()
-
-
-def experiments_2():
-    num_spirals = 1000
-    train_timesteps = 100  # training data length
-    noise_std = 0.1
-    data = generate_spiral_dataset(num_spirals, train_timesteps, noise_std)
-    print("Training dataset shape:", data.shape)  # Expected: (1000, 100, 2)
-
-    # Instantiate and train the Latent ODE model
-    latent_ode_model = LatentODEModel(
-        input_dim=2,
-        rnn_hidden=25,
-        latent_dim=4,
-        dynamics_hidden=20,
-        decoder_hidden=20,
-        timesteps=train_timesteps,
-        lr=0.01
-    )
-    print("Training Latent ODE model on 100-timestep data...")
-    x_data_jnp = jnp.array(data)  # shape (1000, 100, 2)
-    ode_loss_history, ode_time_history = latent_ode_model.train(x_data_jnp, num_epochs=100, batch_size=32)
-    print("Latent ODE training complete. Final Loss:", ode_loss_history[-1])
-    print("Total training time (approx):", sum(ode_time_history), "sec")
-
-    # Use first sample from the dataset for predictions
-    sample_traj = data[0]  # shape (100, 2)
-    sample_traj_np = np.array(sample_traj)
-
-    # 1) Interpolation: Predict using the same 100 timesteps as training
-    x_pred_interp, t_pred_interp = latent_ode_model.predict(jnp.array(sample_traj), pred_timesteps=train_timesteps)
-    x_pred_interp_np = np.array(x_pred_interp)
-
-    # 2) Extrapolation: Predict for a longer horizon (e.g., 150 timesteps)
-    pred_timesteps = 150
-    x_pred_extrap, t_pred_extrap = latent_ode_model.predict(jnp.array(sample_traj), pred_timesteps=pred_timesteps)
-    x_pred_extrap_np = np.array(x_pred_extrap)
-
-    # For extrapolation, generate a clean ground truth spiral (noise-free) over 150 timesteps.
-    clean_spiral = generate_clean_spiral(pred_timesteps, clockwise=True)  # shape (150, 2)
-    clean_spiral_np = np.array(clean_spiral)
-
-    # Plot interpolation (fitting) results: compare noisy training sample (100 timesteps) vs. interpolation.
-    plt.figure(figsize=(10, 5))
-    plt.subplot(1, 2, 1)
-    plt.plot(sample_traj_np[:, 0], sample_traj_np[:, 1], 'o-', label="Noisy Training Data (100 timesteps)")
-    plt.plot(x_pred_interp_np[:, 0], x_pred_interp_np[:, 1], 'x--', label="Latent ODE Interpolation")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.title("Interpolation: Fitting")
-    plt.legend()
-
-    # Plot extrapolation results: compare clean ground truth and extrapolated prediction.
-    plt.subplot(1, 2, 2)
-    plt.plot(sample_traj_np[:, 0], sample_traj_np[:, 1], 'o-', label="Noisy Training Data (first 100 timesteps)")
-    plt.plot(clean_spiral_np[:, 0], clean_spiral_np[:, 1], 'k-', label="Clean Ground Truth (150 timesteps)")
-    plt.plot(x_pred_extrap_np[:, 0], x_pred_extrap_np[:, 1], 'x--', label="Latent ODE Extrapolation")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.title("Extrapolation")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-    # Now train and evaluate the baseline RNN models.
-    print("Training Baseline RNN (Gaussian, without time difference)...")
-    rnn_model = RNNBaselineGaussian(input_dim=2, hidden_dim=25, output_dim=2)
-    rnn_losses, rnn_time = train_rnn_baseline_gaussian(rnn_model, data, num_epochs=100, lr=0.001, use_time_diff=False)
-    rnn_model.eval()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sample_torch = torch.tensor(np.array(sample_traj), dtype=torch.float32).unsqueeze(0).to(device)
-    with torch.no_grad():
-        mu, log_var = rnn_model(sample_torch)
-        rnn_pred = mu.cpu().numpy()[0]
-    # Plot RNN predictions (interpolation)
-    plt.figure(figsize=(8, 6))
-    plot_predictions(sample_traj_np, rnn_pred, title="Baseline RNN (Gaussian) Predictions - Interpolation")
-    plt.show()
-
-    # Compare training losses and times
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 2, 1)
-    plt.plot(ode_loss_history, label="Latent ODE")
-    plt.plot(rnn_losses, label="RNN Baseline")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training Loss Comparison")
-    plt.legend()
-    plt.subplot(1, 2, 2)
-    plt.bar(["Latent ODE", "RNN Baseline"], [sum(ode_time_history), rnn_time], color=["blue", "orange"])
-    plt.ylabel("Time (sec)")
-    plt.title("Training Time Comparison")
-    plt.tight_layout()
-    plt.show()
-
-    print("Extrapolation experiments complete!")
-
+        mu_ccw, logvar_ccw = rnn_vae.encoder(observed_ccw_torch)
+        z_ccw = rnn_vae.reparameterize(mu_ccw, logvar_ccw)
+        rnn_extrap_ccw = rnn_vae.decoder(z_ccw, seq_len=150).cpu().numpy()[0]
+    plot_predictions(clean_spiral_ccw_np, rnn_extrap_ccw, title="RNN-VAE Extrapolation (Counter-Clockwise)")
 
 if __name__ == "__main__":
     main()
-    #experiments_2()

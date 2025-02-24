@@ -2,17 +2,15 @@ import time
 from functools import partial
 import jax
 import jax.numpy as jnp
-from jax import random, grad, jit, vmap, lax
+from jax import random, vmap, lax
 import optax
 import diffrax
 from typing import Dict, Tuple, List, Any
-
 
 def init_linear_params(key: jax.random.PRNGKey,
                        in_dim: int,
                        out_dim: int) -> Dict[str, jnp.ndarray]:
     """Initialize weights and biases for a linear layer."""
-
     W = random.normal(key, (in_dim, out_dim)) * 0.1
     b = jnp.zeros(out_dim)
     return {"W": W, "b": b}
@@ -20,14 +18,12 @@ def init_linear_params(key: jax.random.PRNGKey,
 def linear_forward(params: Dict[str, jnp.ndarray],
                    x: jnp.ndarray) -> jnp.ndarray:
     """Apply a linear layer: out = xW + b."""
-
     return jnp.dot(x, params["W"]) + params["b"]
 
 def init_gru_params(key: jax.random.PRNGKey,
                     input_dim: int,
                     hidden_dim: int) -> Dict[str, jnp.ndarray]:
     """Initialize parameters for a single GRU layer."""
-
     keys = random.split(key, 6)
     return {
         "W_R": random.normal(keys[0], (input_dim, hidden_dim)) * 0.1,
@@ -45,7 +41,6 @@ def gru_cell(params: Dict[str, jnp.ndarray],
              h: jnp.ndarray,
              x: jnp.ndarray) -> jnp.ndarray:
     """One step of GRU update: h_new = GRUCell(h, x)."""
-
     r = jax.nn.sigmoid(jnp.dot(x, params["W_R"]) + jnp.dot(h, params["U_R"]) + params["b_R"])
     z = jax.nn.sigmoid(jnp.dot(x, params["W_Z"]) + jnp.dot(h, params["U_Z"]) + params["b_Z"])
     h_tilde = jnp.tanh(jnp.dot(x, params["W_H"]) + jnp.dot(r * h, params["U_H"]) + params["b_H"])
@@ -65,14 +60,13 @@ def gru_encoder(gru_params: Dict[str, jnp.ndarray],
     return h_final
 
 def init_biencoder_params(key: jax.random.PRNGKey,
-                        input_dim: int,
-                        rnn_hidden_dim: int,
-                        latent_dim: int) -> Dict[str, Any]:
+                          input_dim: int,
+                          rnn_hidden_dim: int,
+                          latent_dim: int) -> Dict[str, Any]:
     """Initialize GRU-based encoder that outputs mean and log-variance for z0."""
     k1, k2, k3, k4 = random.split(key, 4)
     gru_params_fwd = init_gru_params(k1, input_dim, rnn_hidden_dim)
     gru_params_bwd = init_gru_params(k2, input_dim, rnn_hidden_dim)
-
     linear_mean = init_linear_params(k3, 2 * rnn_hidden_dim, latent_dim)
     linear_logvar = init_linear_params(k4, 2 * rnn_hidden_dim, latent_dim)
     return {"gru_fwd": gru_params_fwd, "gru_bwd": gru_params_bwd, "mean": linear_mean, "logvar": linear_logvar}
@@ -82,7 +76,6 @@ def bi_gru_encoder(encoder_params : Dict[str, Any],
     """
     Run both forward and backward GRU encoders on x_seq and concatenate their final hidden states.
     """
-
     h_fwd = gru_encoder(encoder_params["gru_fwd"], x_seq)
     h_bwd = gru_encoder(encoder_params["gru_bwd"], x_seq[::-1])
     return jnp.concatenate([h_fwd, h_bwd], axis=-1)
@@ -90,7 +83,6 @@ def bi_gru_encoder(encoder_params : Dict[str, Any],
 def encode(encoder_params: Dict[str, Any],
            x_seq: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Encode x_seq into z0_mean, z0_logvar."""
-
     h_enc = bi_gru_encoder(encoder_params, x_seq)
     z0_mean = linear_forward(encoder_params["mean"], h_enc)
     z0_logvar = linear_forward(encoder_params["logvar"], h_enc)
@@ -100,7 +92,6 @@ def reparameterize(key: jax.random.PRNGKey,
                    mean: jnp.ndarray,
                    logvar: jnp.ndarray) -> jnp.ndarray:
     """Re-parameterization trick: z0 = mean + eps * std."""
-
     std = jnp.exp(0.5 * logvar)
     eps = random.normal(key, mean.shape)
     return mean + eps * std
@@ -139,14 +130,13 @@ def decode(decoder_params: Dict[str, Any],
     x_recon = linear_forward(decoder_params["linear2"], h)
     return x_recon
 
-
 def latent_ode_loss(encoder_params: Dict[str, Any],
                     latent_dynamics_params: Dict[str, Any],
                     decoder_params: Dict[str, Any],
                     key: jax.random.PRNGKey,
                     x_seq: jnp.ndarray,
                     t_seq: jnp.ndarray,
-                    beta : float) -> jnp.ndarray:
+                    beta: float) -> jnp.ndarray:
     """
     Compute the reconstruction + KL loss for a single time-series x_seq.
     x_seq: shape (T, obs_dim)
@@ -178,13 +168,14 @@ def latent_ode_loss(encoder_params: Dict[str, Any],
 
     # Decode each z(t)
     x_recon = vmap(lambda z: decode(decoder_params, z))(z_t)  # shape (T, obs_dim)
+    # Reconstruction loss: (for continuous data, MSE corresponds to a Gaussian likelihood)
     recon_loss = jnp.mean((x_recon - x_seq) ** 2)
 
-    # KL divergence
+    # KL divergence (per time-step average)
     kl_div = -0.5 * jnp.sum(1.0 + z0_logvar - (z0_mean**2) - jnp.exp(z0_logvar))
     kl_div /= x_seq.shape[0]
 
-    return recon_loss + beta * kl_div # Annealing term
+    return recon_loss + beta * kl_div  # beta can be annealed
 
 class LatentODEModel:
     def __init__(self,
@@ -216,7 +207,6 @@ class LatentODEModel:
         self.lr = lr
         self.key = key
 
-
         self.key, subkey = random.split(self.key)
         self.encoder_params = init_biencoder_params(subkey, input_dim, rnn_hidden, latent_dim)
 
@@ -239,7 +229,7 @@ class LatentODEModel:
                     key: jax.random.PRNGKey,
                     x_batch: jnp.ndarray,  # shape (batch, T, obs_dim)
                     t_seq: jnp.ndarray,
-                    beta : float) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], optax.OptState, jnp.ndarray]:
+                    beta: float) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], optax.OptState, jnp.ndarray]:
         """
         Perform one training step over a batch of time-series data.
         """
@@ -247,6 +237,7 @@ class LatentODEModel:
 
         def loss_fn(params_tuple):
             enc_params, dyn_params, dec_params = params_tuple
+            # Split the key into one per sequence in the batch
             batch_keys = random.split(key, x_batch.shape[0])
             # Compute the loss for each sequence in the batch
             losses = vmap(
@@ -271,8 +262,12 @@ class LatentODEModel:
         for epoch in range(num_epochs):
             start_time = time.time()
 
-            beta = 1.0 - (epoch / num_epochs) # Decreases from 1.0 to ~0.0
-            perm_key = random.PRNGKey(epoch)
+            # Adjust beta: typically, we warm up the KL divergence (e.g., from 0 to 1)
+            beta = epoch / num_epochs  # increasing KL weight over time
+            # Alternatively, if the paper requires beta to decrease, use: beta = 1.0 - (epoch / num_epochs)
+
+            # Shuffle the data (using a new key for permutation)
+            self.key, perm_key = random.split(self.key)
             perm = random.permutation(perm_key, num_samples)
             x_data_shuffled = x_data[perm]
             epoch_loss = 0.0
@@ -281,6 +276,8 @@ class LatentODEModel:
                 batch_start = i * batch_size
                 batch_end = batch_start + batch_size
                 x_batch = x_data_shuffled[batch_start:batch_end]
+                # Update the key for each batch to ensure randomness
+                self.key, subkey = random.split(self.key)
 
                 (self.encoder_params,
                  self.latent_dynamics_params,
@@ -291,7 +288,7 @@ class LatentODEModel:
                      self.latent_dynamics_params,
                      self.decoder_params,
                      self.opt_state,
-                     self.key,
+                     subkey,
                      x_batch,
                      self.t_seq,
                      beta
@@ -338,6 +335,7 @@ class LatentODEModel:
         # Decode each z(t)
         x_pred = vmap(lambda z: decode(self.decoder_params, z))(z_t)
         return x_pred, t_pred
+
 
 
 
