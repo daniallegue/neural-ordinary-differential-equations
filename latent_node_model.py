@@ -15,10 +15,44 @@ def init_linear_params(key: jax.random.PRNGKey,
     b = jnp.zeros(out_dim)
     return {"W": W, "b": b}
 
+
+def conv_node_init_conv_params(key: jax.random.PRNGKey, filter_shape: tuple) -> dict:
+    """
+    Initialize parameters for a convolutional layer.
+
+    :param filter_shape: Tuple (kernel_h, kernel_w, in_channels, out_channels).
+    :return: Dictionary with weights and biases.
+    """
+    w = random.normal(key, filter_shape) * 0.1
+    b = jnp.zeros(filter_shape[-1])
+    return {"w": w, "b": b}
+
 def linear_forward(params: Dict[str, jnp.ndarray],
                    x: jnp.ndarray) -> jnp.ndarray:
     """Apply a linear layer: out = xW + b."""
     return jnp.dot(x, params["W"]) + params["b"]
+
+def conv_node_forward(params: dict, x: jnp.ndarray, stride: tuple = (1, 1), padding: str = "SAME") -> jnp.ndarray:
+    """
+    Apply a convolutional layer.
+
+    :param params: Dictionary with "w" and "b".
+    :param x: Input image tensor of shape (H, W, in_channels).
+    :param stride: Stride for the convolution.
+    :param padding: Padding, e.g. "SAME" or "VALID".
+    :return: Output tensor of shape (H, W, out_channels).
+    """
+    # Add a batch dimension.
+    x = jnp.expand_dims(x, axis=0)  # (1, H, W, in_channels)
+    y = jax.lax.conv_general_dilated(
+        x,
+        params["w"],
+        window_strides=stride,
+        padding=padding,
+        dimension_numbers=("NHWC", "HWIO", "NHWC")
+    )
+    y = y + params["b"]
+    return jnp.squeeze(y, axis=0)
 
 def init_gru_params(key: jax.random.PRNGKey,
                     input_dim: int,
@@ -112,6 +146,18 @@ def latent_dynamics_func(params: Dict[str, Any],
     h = jnp.tanh(linear_forward(params["linear1"], z))
     dz_dt = linear_forward(params["linear2"], h)
     return dz_dt
+
+
+def conv_node_dynamics_func(params: dict, t: float, x: jnp.ndarray) -> jnp.ndarray:
+    """
+    Convolutional dynamics function for ConvNODE.
+
+    x is the current state (e.g. an image tensor) of shape (H, W, C).
+    This function applies two convolutional layers with a ReLU activation in between.
+    """
+    h = jax.nn.relu(conv_node_forward(params["conv1"], x, stride=(1, 1), padding="SAME"))
+    dx_dt = conv_node_forward(params["conv2"], h, stride=(1, 1), padding="SAME")
+    return dx_dt
 
 def init_decoder_params(key: jax.random.PRNGKey,
                         latent_dim: int,
@@ -335,6 +381,63 @@ class LatentODEModel:
         # Decode each z(t)
         x_pred = vmap(lambda z: decode(self.decoder_params, z))(z_t)
         return x_pred, t_pred
+
+class ConvNODE:
+    def __init__(self, image_shape: tuple, hidden_channels: int, kernel_size: int = 3, lr: float = 0.001,
+                 key: jax.random.PRNGKey = random.PRNGKey(0), solver=None):
+        """
+        Convolutional Neural ODE Model for image data (non-augmented).
+
+        :param image_shape: Tuple (H, W, C) for the original image.
+        :param hidden_channels: Number of channels in the hidden convolution layer.
+        :param kernel_size: Kernel size for the convolution layers.
+        :param lr: Learning rate (for later use).
+        :param key: JAX random key.
+        :param solver: diffrax ODE solver to use; defaults to diffrax.Dopri5.
+        """
+        self.image_shape = image_shape  # (H, W, C)
+        self.orig_channels = image_shape[-1]
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.lr = lr
+        self.key = key
+
+        # Initialize convolutional dynamics parameters.
+        # conv1: from orig_channels -> hidden_channels.
+        # conv2: from hidden_channels -> orig_channels.
+        key, subkey1, subkey2 = random.split(self.key, 3)
+        conv1_shape = (kernel_size, kernel_size, self.orig_channels, hidden_channels)
+        conv2_shape = (kernel_size, kernel_size, hidden_channels, self.orig_channels)
+        self.dynamics_params = {
+            "conv1": conv_node_init_conv_params(subkey1, conv1_shape),
+            "conv2": conv_node_init_conv_params(subkey2, conv2_shape)
+        }
+
+        self.solver = solver if solver is not None else diffrax.Dopri5()
+
+    def integrate(self, x0: jnp.ndarray, t0: float, t1: float, t_eval: jnp.ndarray) -> jnp.ndarray:
+        """
+        Integrate the ConvNODE from time t0 to t1 given an initial image x0.
+
+        :param x0: Initial image tensor of shape (H, W, C).
+        :param t0: Initial time.
+        :param t1: Final time.
+        :param t_eval: 1D array of time points at which to save the solution.
+        :return: Integrated image trajectories (shape: (len(t_eval), H, W, C)).
+        """
+        term = diffrax.ODETerm(lambda t, x, args: conv_node_dynamics_func(args, t, x))
+        sol = diffrax.diffeqsolve(
+            term,
+            self.solver,
+            t0=t0,
+            t1=t1,
+            dt0=0.1,
+            y0=x0,
+            args=self.dynamics_params,
+            saveat=diffrax.SaveAt(ts=t_eval)
+        )
+        # sol.ys shape: (T, H, W, C)
+        return sol.ys
 
 
 
