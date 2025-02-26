@@ -1,43 +1,55 @@
 import tensorflow as tf
-import tensorflow_datasets as tfds
 import numpy as np
 
 
-def get_mnist_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True) -> np.ndarray:
+def get_mnist_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True):
     """
-    Returns an iterator for the MNIST dataset.
+    Returns an iterator for the MNIST dataset using tf.keras.datasets.
 
-    :param batch_size (int): Number of samples per batch.
-    :param split (str): Dataset split to load ('train' or 'test').
-    :param shuffle (bool): Whether to shuffle the dataset.
-
-    :returns Iterator yielding batches of (images, labels)
+    :param batch_size: Number of samples per batch.
+    :param split: Which split to load ('train' or 'test').
+    :param shuffle: Whether to shuffle the dataset.
+    :returns: Iterator yielding batches of (images, labels) as NumPy arrays.
     """
+    if split == 'train':
+        (images, labels), _ = tf.keras.datasets.mnist.load_data()
+    elif split == 'test':
+        _, (images, labels) = tf.keras.datasets.mnist.load_data()
+    else:
+        raise ValueError("split must be 'train' or 'test'")
 
-    ds = tfds.load('mnist', split=split, as_supervised=True)
+    images = images.astype(np.float32) / 255.0
+
+    dataset = tf.data.Dataset.from_tensor_slices((images, labels))
     if shuffle:
-        ds = ds.shuffle(10000)
-    # Normalize images to [0,1]
-    ds = ds.map(lambda img, label: (tf.cast(img, tf.float32) / 255.0, label))
-    ds = ds.batch(batch_size)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return tfds.as_numpy(ds)
+        dataset = dataset.shuffle(buffer_size=len(images))
+    dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    return dataset.as_numpy_iterator()
 
 
-def get_cifar10_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True) -> np.ndarray:
+def get_cifar10_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True):
     """
-    Returns an iterator for the CIFAR-10 dataset.
+    Returns an iterator for the CIFAR-10 dataset using tf.keras.datasets.
 
-    :param batch_size (int): Number of samples per batch.
-    :param split (str): Dataset split to load ('train' or 'test').
-    :param shuffle (bool): Whether to shuffle the dataset.
-
-    :returns Iterator yielding batches of (images, labels)
+    :param batch_size: Number of samples per batch.
+    :param split: Which split to load ('train' or 'test').
+    :param shuffle: Whether to shuffle the dataset.
+    :returns: Iterator yielding batches of (images, labels) as NumPy arrays.
     """
-    ds = tfds.load('cifar10', split=split, as_supervised=True)
+    if split == 'train':
+        (images, labels), _ = tf.keras.datasets.cifar10.load_data()
+    elif split == 'test':
+        _, (images, labels) = tf.keras.datasets.cifar10.load_data()
+    else:
+        raise ValueError("split must be 'train' or 'test'")
+
+    # Normalize images to [0,1] and convert to float32
+    images = images.astype(np.float32) / 255.0
+
+    dataset = tf.data.Dataset.from_tensor_slices((images, labels))
     if shuffle:
-        ds = ds.shuffle(10000)
-    ds = ds.map(lambda img, label: (tf.cast(img, tf.float32) / 255.0, label))
-    ds = ds.batch(batch_size)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return tfds.as_numpy(ds)
+        dataset = dataset.shuffle(buffer_size=len(images))
+    dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    return dataset.as_numpy_iterator()

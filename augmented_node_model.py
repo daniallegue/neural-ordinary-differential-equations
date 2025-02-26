@@ -1,8 +1,10 @@
 # augmented_node_model.py
+from functools import partial
 from typing import Dict, Tuple
 
 import jax
 import jax.numpy as jnp
+import optax
 from jax import random
 import diffrax
 
@@ -165,8 +167,51 @@ class AugmentedNeuralODEModel:
         x_t = z_t[:, :self.orig_dim] # Remove augmented dimensions
         return x_t
 
+    @partial(jax.jit, static_args = 0)
+    def train_step(self,
+                   x: jnp.ndarray,
+                   t0: float = 0.0,
+                   t1: float = 1.0,
+                   t_eval: jnp.ndarray = jnp.array([0.0, 1.0]),
+                   optimizer=None,
+                   opt_state=None) -> Tuple[jnp.ndarray, optax.OptState]:
+        """
+        Perform one training step on a single sample x.
 
-class ConvAugmentedNeuralODEModel:
+        :param x: Input state (shape: (orig_dim,))
+        :param t0: Initial time.
+        :param t1: Final time.
+        :param t_eval: 1D array of time points to save the solution.
+        :param optimizer: An optax optimizer.
+        :param opt_state: The current optimizer state.
+        :return: Tuple (loss, new optimizer state)
+        """
+
+        def loss_fn(params):
+            zeros_aug = jnp.zeros(self.aug_dim)
+            z0 = jnp.concatenate([x, zeros_aug], axis=0)
+            term = diffrax.ODETerm(lambda t, z, args: augmented_dynamics_func(args, t, z))
+            sol = diffrax.diffeqsolve(
+                term,
+                self.solver,
+                t0=t0,
+                t1=t1,
+                dt0=0.1,
+                y0=z0,
+                args=params,
+                saveat=diffrax.SaveAt(ts=t_eval)
+            )
+            z_t = sol.ys
+            x_pred = z_t[:, :self.orig_dim]
+            return jnp.mean((x_pred - x) ** 2)
+
+        loss, grads = jax.value_and_grad(loss_fn)(self.dynamics_params)
+        updates, new_opt_state = optimizer.update(grads, opt_state)
+        self.dynamics_params = optax.apply_updates(self.dynamics_params, updates)
+        return loss, new_opt_state
+
+
+class ConvAugmentedNODE:
 
     def __init__(self, image_shape : Tuple, aug_channels : int, hidden_channels : int, kernel_size : int = 3, lr : float = 0.001, key : jax.random.PRNGKey = random.PRNGKey(0), solver = None):
         """
@@ -232,3 +277,46 @@ class ConvAugmentedNeuralODEModel:
         z_t = sol.ys
         x_t = z_t[..., :self.orig_channels]
         return x_t
+
+    @partial(jax.jit, static_args = 0)
+    def train_step(self,
+                   x: jnp.ndarray,
+                   t0: float = 0.0,
+                   t1: float = 1.0,
+                   t_eval: jnp.ndarray = jnp.array([0.0, 1.0]),
+                   optimizer=None,
+                   opt_state=None) -> Tuple[jnp.ndarray, optax.OptState]:
+        """
+        Perform one training step on a single image x.
+
+        :param x: Input image (shape: (H, W, C)).
+        :param t0: Initial time.
+        :param t1: Final time.
+        :param t_eval: 1D array of time points to save the solution.
+        :param optimizer: An optax optimizer.
+        :param opt_state: The current optimizer state.
+        :return: Tuple (loss, new optimizer state)
+        """
+
+        def loss_fn(params):
+            zeros_aug = jnp.zeros((*x.shape[:2], self.aug_channels))
+            z0 = jnp.concatenate([x, zeros_aug], axis=-1)
+            term = diffrax.ODETerm(lambda t, z, args: conv_augmented_dynamics_func(args, t, z))
+            sol = diffrax.diffeqsolve(
+                term,
+                self.solver,
+                t0=t0,
+                t1=t1,
+                dt0=0.1,
+                y0=z0,
+                args=params,
+                saveat=diffrax.SaveAt(ts=t_eval)
+            )
+            z_t = sol.ys
+            x_pred = z_t[..., :self.orig_channels]
+            return jnp.mean((x_pred - x) ** 2) # Return loss
+
+        loss, grads = jax.value_and_grad(loss_fn)(self.dynamics_params)
+        updates, new_opt_state = optimizer.update(grads, opt_state)
+        self.dynamics_params = optax.apply_updates(self.dynamics_params, updates)
+        return loss, new_opt_state

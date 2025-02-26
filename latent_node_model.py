@@ -439,6 +439,46 @@ class ConvNODE:
         # sol.ys shape: (T, H, W, C)
         return sol.ys
 
+    def train_step(self,
+                   x: jnp.ndarray,
+                   t0: float = 0.0,
+                   t1: float = 1.0,
+                   t_eval: jnp.ndarray = jnp.array([0.0, 1.0]),
+                   optimizer=None,
+                   opt_state=None) -> Tuple[jnp.ndarray, optax.OptState]:
+        """
+        Perform one training step on a single image x.
+
+        :param x: Input image (shape: (H, W, C)).
+        :param t0: Initial time.
+        :param t1: Final time.
+        :param t_eval: 1D array of time points at which to save the solution.
+        :param optimizer: An optax optimizer.
+        :param opt_state: The current optimizer state.
+        :return: Tuple (loss, new optimizer state)
+        """
+
+        def loss_fn(params):
+            term = diffrax.ODETerm(lambda t, x, args: conv_node_dynamics_func(args, t, x))
+            sol = diffrax.diffeqsolve(
+                term,
+                self.solver,
+                t0=t0,
+                t1=t1,
+                dt0=0.1,
+                y0=x,
+                args=params,
+                saveat=diffrax.SaveAt(ts=t_eval)
+            )
+            # Use the final integrated image (at t1) as the prediction.
+            x_pred = sol.ys[-1]
+            return jnp.mean((x_pred - x) ** 2)
+
+        loss, grads = jax.value_and_grad(loss_fn)(self.dynamics_params)
+        updates, new_opt_state = optimizer.update(grads, opt_state)
+        self.dynamics_params = optax.apply_updates(self.dynamics_params, updates)
+        return loss, new_opt_state
+
 
 
 
