@@ -5,8 +5,8 @@ import torch
 import torch.nn.functional as F
 import time
 
-from rnn_baseline import RNNVAE
-from latent_node_model import LatentODEModel
+from helpers.rnn_baseline import RNNVAE
+from nodes.latent_node_model import LatentODEModel
 
 def generate_spiral_dataset(num_spirals : int = 1000, timesteps : int = 100, noise_std : float = 0.1) -> jnp.ndarray:
     """

@@ -10,9 +10,9 @@ import numpy as np
 
 from dataloaders import get_mnist_dataloader
 
-# Import the models and their dynamics functions from augmented_node_model.py
-from augmented_node_model import ConvAugmentedNODE
-from latent_node_model import ConvNODE
+# Import the nodes and their dynamics functions from augmented_node_model.py
+from nodes.augmented_node_model import ConvAugmentedNODE
+from nodes.latent_node_model import ConvNODE
 
 
 def train_model(model, optimizer, opt_state, train_loader_fn, num_epochs):
@@ -174,10 +174,10 @@ def plot_results(losses_convnode, losses_convanode,
 def main():
     # Data
     batch_size = 128
-    num_train_epochs = 1
-    train_loader_fn = lambda: get_mnist_dataloader(batch_size=batch_size, split="train", shuffle=True, limit=20)
+    num_train_epochs = 5
+    train_loader_fn = lambda: get_mnist_dataloader(batch_size=batch_size, split="train", shuffle=True, limit=1000)
 
-    test_loader_fn = lambda: get_mnist_dataloader(batch_size=16, split="test", shuffle=False, limit=20)
+    test_loader_fn = lambda: get_mnist_dataloader(batch_size=64, split="test", shuffle=False, limit=200)
 
     # Models
     image_shape = (28, 28, 1)

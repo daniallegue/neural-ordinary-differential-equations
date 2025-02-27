@@ -363,7 +363,7 @@ class ConvAugmentedNODE:
                 solver,
                 t0=t0,
                 t1=t1,
-                dt0=0.001,
+                dt0=0.1,
                 y0=z0,
                 args=params,
                 saveat=diffrax.SaveAt(ts=t_eval)
