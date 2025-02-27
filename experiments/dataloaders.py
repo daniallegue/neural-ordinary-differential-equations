@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 
 
-def get_mnist_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True):
+def get_mnist_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True, limit : int = None):
     """
     Returns an iterator for the MNIST dataset using tf.keras.datasets.
 
@@ -20,15 +20,18 @@ def get_mnist_dataloader(batch_size: int = 128, split: str = 'train', shuffle: b
 
     images = images.astype(np.float32) / 255.0
 
+
     dataset = tf.data.Dataset.from_tensor_slices((images, labels))
     if shuffle:
         dataset = dataset.shuffle(buffer_size=len(images))
+    if limit is not None:
+        dataset = dataset.take(limit)
     dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     return dataset.as_numpy_iterator()
 
 
-def get_cifar10_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True):
+def get_cifar10_dataloader(batch_size: int = 128, split: str = 'train', shuffle: bool = True, limit : int = None):
     """
     Returns an iterator for the CIFAR-10 dataset using tf.keras.datasets.
 
@@ -50,6 +53,8 @@ def get_cifar10_dataloader(batch_size: int = 128, split: str = 'train', shuffle:
     dataset = tf.data.Dataset.from_tensor_slices((images, labels))
     if shuffle:
         dataset = dataset.shuffle(buffer_size=len(images))
+    if limit is not None:
+        dataset = dataset.take(list)
     dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     return dataset.as_numpy_iterator()

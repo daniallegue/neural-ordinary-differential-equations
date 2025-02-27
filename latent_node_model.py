@@ -25,7 +25,7 @@ def conv_node_init_conv_params(key: jax.random.PRNGKey, filter_shape: tuple) -> 
     """
     w = random.normal(key, filter_shape) * 0.1
     b = jnp.zeros(filter_shape[-1])
-    return {"w": w, "b": b}
+    return {"W": w, "b": b}
 
 def linear_forward(params: Dict[str, jnp.ndarray],
                    x: jnp.ndarray) -> jnp.ndarray:
@@ -42,17 +42,20 @@ def conv_node_forward(params: dict, x: jnp.ndarray, stride: tuple = (1, 1), padd
     :param padding: Padding, e.g. "SAME" or "VALID".
     :return: Output tensor of shape (H, W, out_channels).
     """
-    # Add a batch dimension.
-    x = jnp.expand_dims(x, axis=0)  # (1, H, W, in_channels)
+    if x.ndim == 2:
+        x = x[..., None]
+
+    x = jnp.expand_dims(x, axis=0)
     y = jax.lax.conv_general_dilated(
         x,
-        params["w"],
+        params['W'],
         window_strides=stride,
         padding=padding,
         dimension_numbers=("NHWC", "HWIO", "NHWC")
     )
-    y = y + params["b"]
-    return jnp.squeeze(y, axis=0)
+
+    y = y + params['b']
+    return jnp.squeeze(y, axis=0)  # Remove batch dimension
 
 def init_gru_params(key: jax.random.PRNGKey,
                     input_dim: int,
@@ -382,6 +385,7 @@ class LatentODEModel:
         x_pred = vmap(lambda z: decode(self.decoder_params, z))(z_t)
         return x_pred, t_pred
 
+
 class ConvNODE:
     def __init__(self, image_shape: tuple, hidden_channels: int, kernel_size: int = 3, lr: float = 0.001,
                  key: jax.random.PRNGKey = random.PRNGKey(0), solver=None):
@@ -425,6 +429,10 @@ class ConvNODE:
         :param t_eval: 1D array of time points at which to save the solution.
         :return: Integrated image trajectories (shape: (len(t_eval), H, W, C)).
         """
+        # Ensure image has a channel dimension.
+        if x0.ndim == 2:
+            x0 = x0[..., None]
+
         term = diffrax.ODETerm(lambda t, x, args: conv_node_dynamics_func(args, t, x))
         sol = diffrax.diffeqsolve(
             term,
@@ -439,13 +447,14 @@ class ConvNODE:
         # sol.ys shape: (T, H, W, C)
         return sol.ys
 
+    @partial(jax.jit, static_argnums=(0,), static_argnames=("optimizer",))
     def train_step(self,
                    x: jnp.ndarray,
                    t0: float = 0.0,
                    t1: float = 1.0,
                    t_eval: jnp.ndarray = jnp.array([0.0, 1.0]),
                    optimizer=None,
-                   opt_state=None) -> Tuple[jnp.ndarray, optax.OptState]:
+                   opt_state=None) -> Tuple[jnp.ndarray, int, optax.OptState]:
         """
         Perform one training step on a single image x.
 
@@ -455,8 +464,10 @@ class ConvNODE:
         :param t_eval: 1D array of time points at which to save the solution.
         :param optimizer: An optax optimizer.
         :param opt_state: The current optimizer state.
-        :return: Tuple (loss, new optimizer state)
+        :return: Tuple (loss, NFE, new optimizer state)
         """
+        if x.ndim == 2:
+            x = x[..., None]
 
         def loss_fn(params):
             term = diffrax.ODETerm(lambda t, x, args: conv_node_dynamics_func(args, t, x))
@@ -470,16 +481,67 @@ class ConvNODE:
                 args=params,
                 saveat=diffrax.SaveAt(ts=t_eval)
             )
-            # Use the final integrated image (at t1) as the prediction.
+            nfe = 0
+            x_pred = sol.ys[-1]
+            return jnp.mean((x_pred - x) ** 2), nfe
+
+        def only_loss(p):
+            loss_val, _ = loss_fn(p)
+            return loss_val
+
+        loss, grads = jax.value_and_grad(only_loss)(self.dynamics_params)
+        updates, new_opt_state = optimizer.update(grads, opt_state)
+        self.dynamics_params = optax.apply_updates(self.dynamics_params, updates)
+        _, nfe = loss_fn(self.dynamics_params)
+        return loss, nfe, new_opt_state
+
+    @partial(jax.jit, static_argnums=(0,), static_argnames=("optimizer",))
+    def batch_train_step(self,
+                         params: dict,
+                         batch: jnp.ndarray,
+                         t0: float = 0.0,
+                         t1: float = 1.0,
+                         t_eval: jnp.ndarray = jnp.array([0.0, 1.0]),
+                         solver=None,
+                         optimizer=None,
+                         opt_state=None) -> Tuple[dict, jnp.ndarray, optax.OptState]:
+        """
+        Perform one training step on a batch of images.
+        This function is pure—it takes the current parameters as input and returns updated parameters.
+
+        :param params: Current dynamics parameters.
+        :param batch: Batch of images (shape: (B, H, W, C)).
+        :param t0: Initial time.
+        :param t1: Final time.
+        :param t_eval: 1D array of time points.
+        :param solver: The ODE solver to use.
+        :param optimizer: An optax optimizer.
+        :param opt_state: The current optimizer state.
+        :return: Tuple (new_params, NFE, new optimizer state)
+        """
+
+        def single_loss(x):
+            if x.ndim == 2:
+                x = x[..., None]
+            term = diffrax.ODETerm(lambda t, x, args: conv_node_dynamics_func(args, t, x))
+            sol = diffrax.diffeqsolve(
+                term,
+                solver,
+                t0=t0,
+                t1=t1,
+                dt0=0.1,
+                y0=x,
+                args=params,
+                saveat=diffrax.SaveAt(ts=t_eval)
+            )
             x_pred = sol.ys[-1]
             return jnp.mean((x_pred - x) ** 2)
 
-        loss, grads = jax.value_and_grad(loss_fn)(self.dynamics_params)
-        updates, new_opt_state = optimizer.update(grads, opt_state)
-        self.dynamics_params = optax.apply_updates(self.dynamics_params, updates)
-        return loss, new_opt_state
-
-
-
+        # Vectorize the loss over the batch.
+        batch_loss_fn = lambda params, batch: jnp.mean(jax.vmap(single_loss)(batch))
+        loss, grads = jax.value_and_grad(batch_loss_fn)(params, batch)
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
+        return new_params, loss, new_opt_state
 
 
